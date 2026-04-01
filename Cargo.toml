@@ -2,6 +2,12 @@
 name = "anchovy"
 version = "0.1.0"
 edition = "2024"
+description = "Async Unix socket stream with file descriptor passing"
+license = "Apache-2.0"
+authors = ["Matilde Morrone <contact@matilde.pet>"]
+documentation = "https://docs.rs/anchovy"
+repository = "https://github.com/tailwags/anchovy"
+include = ["src/**/*.rs", "README.md", "LICENSE"]
 
 [dependencies]
 rustix = { version = "1.1.4", features = ["net"] }

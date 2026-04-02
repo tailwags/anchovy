@@ -10,11 +10,9 @@ use std::{
     task::{Context, Poll, ready},
 };
 
-use rustix::{
-    net::{
-        RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags, SendAncillaryBuffer,
-        SendAncillaryMessage, SendFlags, recvmsg, sendmsg,
-    },
+use rustix::net::{
+    RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags, SendAncillaryBuffer,
+    SendAncillaryMessage, SendFlags, recvmsg, sendmsg,
 };
 use tokio::io::{self, AsyncRead, AsyncWrite, ReadBuf, unix::AsyncFd};
 
@@ -26,15 +24,38 @@ pub struct AnchovyStream {
     encode_fds: VecDeque<OwnedFd>,
 }
 
-impl AnchovyStream {
-    pub fn new(stream: UnixStream) -> io::Result<Self> {
-        AsyncFd::new(stream).map(|stream| Self {
-            stream,
+pub trait IntoUnixStream: sealed::Sealed {
+    fn into_unix_stream(self) -> io::Result<UnixStream>;
+}
 
+impl IntoUnixStream for UnixStream {
+    fn into_unix_stream(self) -> io::Result<UnixStream> {
+        Ok(self)
+    }
+}
+
+impl IntoUnixStream for tokio::net::UnixStream {
+    fn into_unix_stream(self) -> io::Result<UnixStream> {
+        self.into_std()
+    }
+}
+
+mod sealed {
+    pub trait Sealed {}
+
+    impl Sealed for tokio::net::UnixStream {}
+    impl Sealed for std::os::unix::net::UnixStream {}
+}
+
+impl AnchovyStream {
+    pub fn new<T: IntoUnixStream>(stream: T) -> io::Result<Self> {
+        AsyncFd::new(stream.into_unix_stream()?).map(|stream| Self {
+            stream,
             decode_fds: VecDeque::new(),
             encode_fds: VecDeque::new(),
         })
     }
+
     pub fn read_queue(&self) -> &VecDeque<OwnedFd> {
         &self.decode_fds
     }

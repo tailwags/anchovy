@@ -22,8 +22,8 @@ const MAX_FDS_PER_MSG: usize = 253;
 
 pub struct AnchovyStream {
     stream: AsyncFd<UnixStream>,
-    pub decode_fds: VecDeque<OwnedFd>,
-    pub encode_fds: VecDeque<OwnedFd>,
+    decode_fds: VecDeque<OwnedFd>,
+    encode_fds: VecDeque<OwnedFd>,
 }
 
 impl AnchovyStream {
@@ -34,6 +34,21 @@ impl AnchovyStream {
             decode_fds: VecDeque::new(),
             encode_fds: VecDeque::new(),
         })
+    }
+    pub fn read_queue(&self) -> &VecDeque<OwnedFd> {
+        &self.decode_fds
+    }
+
+    pub fn read_queue_mut(&mut self) -> &mut VecDeque<OwnedFd> {
+        &mut self.decode_fds
+    }
+
+    pub fn write_queue(&self) -> &VecDeque<OwnedFd> {
+        &self.encode_fds
+    }
+
+    pub fn write_queue_mut(&mut self) -> &mut VecDeque<OwnedFd> {
+        &mut self.encode_fds
     }
 
     fn poll_write_impl(

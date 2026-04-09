@@ -1,3 +1,6 @@
+#![doc = include_str!("../README.md")]
+#![deny(missing_docs)]
+
 use std::{
     collections::VecDeque,
     io::{IoSlice, IoSliceMut},
@@ -16,15 +19,85 @@ use rustix::net::{
 };
 use tokio::io::{self, AsyncRead, AsyncWrite, ReadBuf, unix::AsyncFd};
 
-const MAX_FDS_PER_MSG: usize = 253;
+/// Maximum number of file descriptors that can be passed in a single D-Bus message,
+/// as defined by the [D-Bus specification].
+///
+/// [D-Bus specification]: https://dbus.freedesktop.org/doc/dbus-specification.html
+pub const DBUS_FD_LIMIT: usize = 253;
 
-pub struct AnchovyStream {
+/// Ancillary buffer size (bytes) required to send or receive up to [`DBUS_FD_LIMIT`] file descriptors
+/// via `SCM_RIGHTS` in a single `recvmsg` / `sendmsg` call.
+///
+/// Equals `rustix::cmsg_space!(ScmRights(DBUS_FD_LIMIT))`. Use this as the `S` parameter of
+/// [`AnchovyStream`] when working with D-Bus; [`DbusFdStream`] does this automatically.
+pub const DBUS_SCM_RIGHTS: usize = rustix::cmsg_space!(ScmRights(DBUS_FD_LIMIT));
+
+/// Maximum number of file descriptors that can be passed in a single Wayland message,
+/// as defined by the Wayland reference implementation (`WAYLAND_MAX_FDS_OUT`).
+pub const WAYLAND_FD_LIMIT: usize = 28;
+
+/// Ancillary buffer size (bytes) required to send or receive up to [`WAYLAND_FD_LIMIT`] file descriptors
+/// via `SCM_RIGHTS` in a single `recvmsg` / `sendmsg` call.
+///
+/// Equals `rustix::cmsg_space!(ScmRights(WAYLAND_FD_LIMIT))`. Use this as the `S` parameter of
+/// [`AnchovyStream`] when working with Wayland; [`WaylandFdStream`] does this automatically.
+pub const WAYLAND_SCM_RIGHTS: usize = rustix::cmsg_space!(ScmRights(WAYLAND_FD_LIMIT));
+
+/// A Unix socket stream with support for passing file descriptors via `SCM_RIGHTS`
+/// ancillary messages.
+///
+/// Implements [`AsyncRead`] and [`AsyncWrite`], with vectored write support.
+///
+/// # Const generic `S`
+///
+/// `S` is the size in bytes of the stack-allocated ancillary data buffer used on each
+/// [`recvmsg`] / [`sendmsg`] call. It must be at least
+/// `rustix::cmsg_space!(ScmRights(N))` where `N` is the maximum number of file
+/// descriptors expected in a single message. Passing a smaller value will cause
+/// received file descriptors to be silently truncated by the kernel.
+///
+/// Prefer the type aliases [`DbusFdStream`] and [`WaylandFdStream`] over instantiating
+/// `AnchovyStream` directly; they use [`DBUS_SCM_RIGHTS`] and [`WAYLAND_SCM_RIGHTS`]
+/// respectively.
+///
+/// # File descriptor queues
+///
+/// [`write_queue_mut`] holds [`OwnedFd`] values to send as `SCM_RIGHTS` ancillary data
+/// with the next write. All queued descriptors go out together in a single message,
+/// then the queue is cleared.
+///
+/// [`read_queue_mut`] receives file descriptors from each `recvmsg` call.
+///
+/// [`write_queue_mut`]: AnchovyStream::write_queue_mut
+/// [`read_queue_mut`]: AnchovyStream::read_queue_mut
+/// [rustix]: https://docs.rs/rustix
+pub struct AnchovyStream<const S: usize> {
     stream: AsyncFd<UnixStream>,
     decode_fds: VecDeque<OwnedFd>,
     encode_fds: VecDeque<OwnedFd>,
 }
 
+/// An [`AnchovyStream`] sized for D-Bus (`S = `[`DBUS_SCM_RIGHTS`], supporting up to [`DBUS_FD_LIMIT`] FDs).
+pub type DbusFdStream = AnchovyStream<DBUS_SCM_RIGHTS>;
+
+/// An [`AnchovyStream`] sized for Wayland (`S = `[`WAYLAND_SCM_RIGHTS`], supporting up to [`WAYLAND_FD_LIMIT`] FDs).
+pub type WaylandFdStream = AnchovyStream<WAYLAND_SCM_RIGHTS>;
+
+/// Seals [`IntoUnixStream`] against external implementations.
+mod sealed {
+    pub trait Sealed {}
+
+    impl Sealed for tokio::net::UnixStream {}
+    impl Sealed for std::os::unix::net::UnixStream {}
+}
+
+/// Converts a Unix stream type into a [`std::os::unix::net::UnixStream`].
+///
+/// Implemented for both [`std::os::unix::net::UnixStream`] and
+/// [`tokio::net::UnixStream`], allowing [`AnchovyStream::new`] to accept either.
+/// Sealed to prevent external implementations.
 pub trait IntoUnixStream: sealed::Sealed {
+    /// Converts this stream into a [`std::os::unix::net::UnixStream`].
     fn into_unix_stream(self) -> io::Result<UnixStream>;
 }
 
@@ -40,14 +113,11 @@ impl IntoUnixStream for tokio::net::UnixStream {
     }
 }
 
-mod sealed {
-    pub trait Sealed {}
-
-    impl Sealed for tokio::net::UnixStream {}
-    impl Sealed for std::os::unix::net::UnixStream {}
-}
-
-impl AnchovyStream {
+impl<const S: usize> AnchovyStream<S> {
+    /// Creates a new `AnchovyStream` wrapping the given Unix stream.
+    ///
+    /// Accepts either a [`std::os::unix::net::UnixStream`] or a
+    /// [`tokio::net::UnixStream`].
     pub fn new<T: IntoUnixStream>(stream: T) -> io::Result<Self> {
         AsyncFd::new(stream.into_unix_stream()?).map(|stream| Self {
             stream,
@@ -56,18 +126,29 @@ impl AnchovyStream {
         })
     }
 
+    /// Returns a reference to the queue of file descriptors received from the peer.
+    ///
+    /// Populated after each successful [`recvmsg`] call.
     pub fn read_queue(&self) -> &VecDeque<OwnedFd> {
         &self.decode_fds
     }
 
+    /// Returns a mutable reference to the queue of file descriptors received from the peer.
+    ///
+    /// Drain this queue after reading to collect them.
     pub fn read_queue_mut(&mut self) -> &mut VecDeque<OwnedFd> {
         &mut self.decode_fds
     }
 
+    /// Returns a reference to the queue of file descriptors to be sent to the peer.
     pub fn write_queue(&self) -> &VecDeque<OwnedFd> {
         &self.encode_fds
     }
 
+    /// Returns a mutable reference to the queue of file descriptors to be sent to the peer.
+    ///
+    /// Push [`OwnedFd`] values here before writing data. All queued descriptors are
+    /// sent together in the next [`sendmsg`] call and the queue is cleared afterwards.
     pub fn write_queue_mut(&mut self) -> &mut VecDeque<OwnedFd> {
         &mut self.encode_fds
     }
@@ -86,8 +167,7 @@ impl AnchovyStream {
             let send_result = {
                 let raw: Vec<BorrowedFd<'_>> = encode_fds.iter().map(|fd| fd.as_fd()).collect();
 
-                let mut cmsg_space =
-                    [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(MAX_FDS_PER_MSG))];
+                let mut cmsg_space = [MaybeUninit::uninit(); S];
                 let mut ancillary = SendAncillaryBuffer::new(&mut cmsg_space);
 
                 if !raw.is_empty() {
@@ -120,7 +200,7 @@ impl AnchovyStream {
     }
 }
 
-impl AsyncRead for AnchovyStream {
+impl<const S: usize> AsyncRead for AnchovyStream<S> {
     fn poll_read(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -134,8 +214,7 @@ impl AsyncRead for AnchovyStream {
         loop {
             let mut guard = ready!(stream.poll_read_ready(cx))?;
 
-            let mut cmsg_space =
-                [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(MAX_FDS_PER_MSG))];
+            let mut cmsg_space = [MaybeUninit::uninit(); S];
             let mut ancillary = RecvAncillaryBuffer::new(&mut cmsg_space);
 
             let unfilled = buf.initialize_unfilled();
@@ -167,7 +246,7 @@ impl AsyncRead for AnchovyStream {
     }
 }
 
-impl AsyncWrite for AnchovyStream {
+impl<const S: usize> AsyncWrite for AnchovyStream<S> {
     fn poll_write(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,

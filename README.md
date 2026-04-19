@@ -13,10 +13,9 @@ messages.
 anchovy = "0.1"
 ```
 
-Use `DbusFdStream` or `WaylandFdStream` for those protocols. For other cases,
-use `AnchovyStream<S>` directly with `S` set to at least
-`rustix::cmsg_space!(ScmRights(N))`, where `N` is the maximum number of file
-descriptors you expect per message.
+Use `AnchovyStream<DBUS_SCM_RIGHTS>` for D-Bus or `AnchovyStream<WAYLAND_SCM_RIGHTS>`
+for Wayland. For other protocols, set `S` to `rustix::cmsg_space!(ScmRights(N))`,
+where `N` is the maximum number of file descriptors you expect per message.
 
 ### Sending file descriptors
 
@@ -25,11 +24,11 @@ descriptors go out together in a single `sendmsg` call, then the queue is
 cleared.
 
 ```rust,no_run
-use anchovy::DbusFdStream;
+use anchovy::{AnchovyStream, DBUS_SCM_RIGHTS};
 use std::os::fd::OwnedFd;
 use tokio::io::AsyncWriteExt;
 
-async fn send_fd(stream: &mut DbusFdStream, fd: OwnedFd) -> std::io::Result<()> {
+async fn send_fd(stream: &mut AnchovyStream<DBUS_SCM_RIGHTS>, fd: OwnedFd) -> std::io::Result<()> {
     stream.write_queue_mut().push_back(fd);
     stream.write_all(b"payload").await
 }
@@ -41,10 +40,10 @@ Descriptors received with a message land in the read queue. Drain it after
 each read.
 
 ```rust,no_run
-use anchovy::DbusFdStream;
+use anchovy::{AnchovyStream, DBUS_SCM_RIGHTS};
 use tokio::io::AsyncReadExt;
 
-async fn recv_fds(stream: &mut DbusFdStream) -> std::io::Result<()> {
+async fn recv_fds(stream: &mut AnchovyStream<DBUS_SCM_RIGHTS>) -> std::io::Result<()> {
     let mut buf = vec![0u8; 64];
     stream.read(&mut buf).await?;
     for fd in stream.read_queue_mut().drain(..) {

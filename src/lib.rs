@@ -29,7 +29,7 @@ pub const DBUS_FD_LIMIT: usize = 253;
 /// via `SCM_RIGHTS` in a single `recvmsg` / `sendmsg` call.
 ///
 /// Equals `rustix::cmsg_space!(ScmRights(DBUS_FD_LIMIT))`. Use this as the `S` parameter of
-/// [`AnchovyStream`] when working with D-Bus; [`DbusFdStream`] does this automatically.
+/// [`AnchovyStream`] when working with D-Bus.
 pub const DBUS_SCM_RIGHTS: usize = rustix::cmsg_space!(ScmRights(DBUS_FD_LIMIT));
 
 /// Maximum number of file descriptors that can be passed in a single Wayland message,
@@ -40,7 +40,7 @@ pub const WAYLAND_FD_LIMIT: usize = 28;
 /// via `SCM_RIGHTS` in a single `recvmsg` / `sendmsg` call.
 ///
 /// Equals `rustix::cmsg_space!(ScmRights(WAYLAND_FD_LIMIT))`. Use this as the `S` parameter of
-/// [`AnchovyStream`] when working with Wayland; [`WaylandFdStream`] does this automatically.
+/// [`AnchovyStream`] when working with Wayland.
 pub const WAYLAND_SCM_RIGHTS: usize = rustix::cmsg_space!(ScmRights(WAYLAND_FD_LIMIT));
 
 /// A Unix socket stream with support for passing file descriptors via `SCM_RIGHTS`
@@ -56,9 +56,7 @@ pub const WAYLAND_SCM_RIGHTS: usize = rustix::cmsg_space!(ScmRights(WAYLAND_FD_L
 /// descriptors expected in a single message. Passing a smaller value will cause
 /// received file descriptors to be silently truncated by the kernel.
 ///
-/// Prefer the type aliases [`DbusFdStream`] and [`WaylandFdStream`] over instantiating
-/// `AnchovyStream` directly; they use [`DBUS_SCM_RIGHTS`] and [`WAYLAND_SCM_RIGHTS`]
-/// respectively.
+/// For D-Bus, pass [`DBUS_SCM_RIGHTS`] as `S`; for Wayland, pass [`WAYLAND_SCM_RIGHTS`].
 ///
 /// # File descriptor queues
 ///
@@ -76,12 +74,6 @@ pub struct AnchovyStream<const S: usize> {
     decode_fds: VecDeque<OwnedFd>,
     encode_fds: VecDeque<OwnedFd>,
 }
-
-/// An [`AnchovyStream`] sized for D-Bus (`S = `[`DBUS_SCM_RIGHTS`], supporting up to [`DBUS_FD_LIMIT`] FDs).
-pub type DbusFdStream = AnchovyStream<DBUS_SCM_RIGHTS>;
-
-/// An [`AnchovyStream`] sized for Wayland (`S = `[`WAYLAND_SCM_RIGHTS`], supporting up to [`WAYLAND_FD_LIMIT`] FDs).
-pub type WaylandFdStream = AnchovyStream<WAYLAND_SCM_RIGHTS>;
 
 /// Seals [`IntoUnixStream`] against external implementations.
 mod sealed {

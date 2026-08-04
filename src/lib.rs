@@ -16,8 +16,8 @@ use std::{
 use rustix::{
     io::retry_on_intr,
     net::{
-    RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags, ReturnFlags, SendAncillaryBuffer,
-    SendAncillaryMessage, SendFlags, recvmsg, sendmsg,
+        RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags, ReturnFlags, SendAncillaryBuffer,
+        SendAncillaryMessage, SendFlags, recvmsg, sendmsg,
     },
 };
 use tokio::io::{self, AsyncRead, AsyncWrite, ReadBuf, unix::AsyncFd};
@@ -65,7 +65,7 @@ pub const WAYLAND_FD_LIMIT: usize = 28;
 /// The read queue is bounded to prevent a peer from exhausting the process file
 /// descriptor table: a read whose descriptors would push the queue past the limit
 /// ([`DEFAULT_READ_QUEUE_LIMIT`] unless set via [`with_limits`] or
-/// [`set_read_queue_limit`]) fails with [`InvalidData`](io::ErrorKind::InvalidData)
+/// [`set_read_queue_limit`]) fails with [`QuotaExceeded`](io::ErrorKind::QuotaExceeded)
 /// and that message's descriptors are closed.
 ///
 /// [`write_queue_mut`]: AnchovyStream::write_queue_mut
@@ -135,7 +135,7 @@ impl<const S: usize> AnchovyStream<S> {
     ///
     /// `read_queue_limit` bounds how many received file descriptors may sit
     /// undrained in the read queue; a read that would exceed it fails with
-    /// [`InvalidData`](io::ErrorKind::InvalidData). Pass [`usize::MAX`] for an
+    /// [`QuotaExceeded`](io::ErrorKind::QuotaExceeded). Pass [`usize::MAX`] for an
     /// effectively unbounded queue.
     pub fn with_limits<T: IntoUnixStream>(stream: T, read_queue_limit: usize) -> io::Result<Self> {
         AsyncFd::new(stream.into_unix_stream()?).map(|stream| Self {
@@ -220,12 +220,12 @@ impl<const S: usize> AnchovyStream<S> {
 
                 guard.try_io(|inner| {
                     retry_on_intr(|| {
-                    sendmsg(
-                        inner.get_ref(),
-                        bufs,
-                        &mut ancillary,
-                        SendFlags::DONTWAIT | SendFlags::NOSIGNAL,
-                    )
+                        sendmsg(
+                            inner.get_ref(),
+                            bufs,
+                            &mut ancillary,
+                            SendFlags::DONTWAIT | SendFlags::NOSIGNAL,
+                        )
                     })
                     .map_err(|e| io::Error::from_raw_os_error(e.raw_os_error()))
                 })
@@ -268,12 +268,12 @@ impl<const S: usize> AsyncRead for AnchovyStream<S> {
 
             match guard.try_io(|inner| {
                 retry_on_intr(|| {
-                recvmsg(
-                    inner.get_ref(),
-                    &mut [IoSliceMut::new(unfilled)],
-                    &mut ancillary,
-                    RecvFlags::DONTWAIT | RecvFlags::CMSG_CLOEXEC,
-                )
+                    recvmsg(
+                        inner.get_ref(),
+                        &mut [IoSliceMut::new(unfilled)],
+                        &mut ancillary,
+                        RecvFlags::DONTWAIT | RecvFlags::CMSG_CLOEXEC,
+                    )
                 })
                 .map_err(|e| io::Error::from_raw_os_error(e.raw_os_error()))
             }) {
@@ -310,7 +310,7 @@ impl<const S: usize> AsyncRead for AnchovyStream<S> {
                         // read fails.
                         decode_fds.truncate(retained);
                         return Poll::Ready(Err(io::Error::new(
-                            io::ErrorKind::InvalidData,
+                            io::ErrorKind::QuotaExceeded,
                             "peer exceeded the stream's fd queue limit",
                         )));
                     }

@@ -203,12 +203,12 @@ impl<const S: usize> AnchovyStream<S> {
             return Poll::Ready(Ok(0));
         }
 
+        let raw: Vec<BorrowedFd<'_>> = encode_fds.iter().map(AsFd::as_fd).collect();
+
         loop {
             let mut guard = ready!(stream.poll_write_ready(cx))?;
 
             let send_result = {
-                let raw: Vec<BorrowedFd<'_>> = encode_fds.iter().map(|fd| fd.as_fd()).collect();
-
                 let mut ancillary = SendAncillaryBuffer::new(cmsg_buffer);
 
                 if !raw.is_empty() && !ancillary.push(SendAncillaryMessage::ScmRights(&raw)) {

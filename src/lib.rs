@@ -98,6 +98,8 @@ pub trait IntoUnixStream: sealed::Sealed {
 
 impl IntoUnixStream for UnixStream {
     fn into_unix_stream(self) -> io::Result<UnixStream> {
+        self.set_nonblocking(true)?;
+
         Ok(self)
     }
 }

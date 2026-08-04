@@ -13,9 +13,12 @@ use std::{
     task::{Context, Poll, ready},
 };
 
-use rustix::net::{
+use rustix::{
+    io::retry_on_intr,
+    net::{
     RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags, ReturnFlags, SendAncillaryBuffer,
     SendAncillaryMessage, SendFlags, recvmsg, sendmsg,
+    },
 };
 use tokio::io::{self, AsyncRead, AsyncWrite, ReadBuf, unix::AsyncFd};
 
@@ -216,12 +219,14 @@ impl<const S: usize> AnchovyStream<S> {
                 }
 
                 guard.try_io(|inner| {
+                    retry_on_intr(|| {
                     sendmsg(
                         inner.get_ref(),
                         bufs,
                         &mut ancillary,
                         SendFlags::DONTWAIT | SendFlags::NOSIGNAL,
                     )
+                    })
                     .map_err(|e| io::Error::from_raw_os_error(e.raw_os_error()))
                 })
             };
@@ -262,12 +267,14 @@ impl<const S: usize> AsyncRead for AnchovyStream<S> {
             let unfilled = buf.initialize_unfilled();
 
             match guard.try_io(|inner| {
+                retry_on_intr(|| {
                 recvmsg(
                     inner.get_ref(),
                     &mut [IoSliceMut::new(unfilled)],
                     &mut ancillary,
                     RecvFlags::DONTWAIT | RecvFlags::CMSG_CLOEXEC,
                 )
+                })
                 .map_err(|e| io::Error::from_raw_os_error(e.raw_os_error()))
             }) {
                 Ok(Ok(msg)) => {

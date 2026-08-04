@@ -2,6 +2,7 @@
 name = "anchovy"
 version = "0.3.0"
 edition = "2024"
+rust-version = "1.85"
 description = "Async Unix socket stream with file descriptor passing"
 license = "Apache-2.0"
 authors = ["Matilde Morrone <contact@matilde.pet>"]

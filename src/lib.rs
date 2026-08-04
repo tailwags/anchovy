@@ -59,13 +59,23 @@ pub const WAYLAND_FD_LIMIT: usize = 28;
 ///
 /// [`read_queue_mut`] receives file descriptors from each `recvmsg` call.
 ///
+/// The read queue is bounded to prevent a peer from exhausting the process file
+/// descriptor table: a read whose descriptors would push the queue past the limit
+/// ([`DEFAULT_READ_QUEUE_LIMIT`] unless set via [`with_limits`] or
+/// [`set_read_queue_limit`]) fails with [`InvalidData`](io::ErrorKind::InvalidData)
+/// and that message's descriptors are closed.
+///
 /// [`write_queue_mut`]: AnchovyStream::write_queue_mut
 /// [`read_queue_mut`]: AnchovyStream::read_queue_mut
+/// [`DEFAULT_READ_QUEUE_LIMIT`]: AnchovyStream::DEFAULT_READ_QUEUE_LIMIT
+/// [`with_limits`]: AnchovyStream::with_limits
+/// [`set_read_queue_limit`]: AnchovyStream::set_read_queue_limit
 pub struct AnchovyStream<const S: usize> {
     stream: AsyncFd<UnixStream>,
     decode_fds: VecDeque<OwnedFd>,
     encode_fds: VecDeque<OwnedFd>,
     cmsg_buffer: Box<[MaybeUninit<u8>]>,
+    read_queue_limit: usize,
 }
 
 /// Seals [`IntoUnixStream`] against external implementations.
@@ -103,17 +113,47 @@ impl<const S: usize> AnchovyStream<S> {
     /// descriptors via `SCM_RIGHTS` in a single `recvmsg` / `sendmsg` call.
     const SCM_RIGHTS_SPACE: usize = rustix::cmsg_space!(ScmRights(S));
 
-    /// Creates a new `AnchovyStream` wrapping the given Unix stream.
+    /// Default limit on file descriptors retained in the read queue: four
+    /// messages' worth.
+    pub const DEFAULT_READ_QUEUE_LIMIT: usize = 4 * S;
+
+    /// Creates a new `AnchovyStream` wrapping the given Unix stream, with the
+    /// read queue limited to [`DEFAULT_READ_QUEUE_LIMIT`](Self::DEFAULT_READ_QUEUE_LIMIT).
     ///
     /// Accepts either a [`std::os::unix::net::UnixStream`] or a
     /// [`tokio::net::UnixStream`].
     pub fn new<T: IntoUnixStream>(stream: T) -> io::Result<Self> {
+        Self::with_limits(stream, Self::DEFAULT_READ_QUEUE_LIMIT)
+    }
+
+    /// Creates a new `AnchovyStream` with an explicit read queue limit.
+    ///
+    /// `read_queue_limit` bounds how many received file descriptors may sit
+    /// undrained in the read queue; a read that would exceed it fails with
+    /// [`InvalidData`](io::ErrorKind::InvalidData). Pass [`usize::MAX`] for an
+    /// effectively unbounded queue.
+    pub fn with_limits<T: IntoUnixStream>(stream: T, read_queue_limit: usize) -> io::Result<Self> {
         AsyncFd::new(stream.into_unix_stream()?).map(|stream| Self {
             stream,
             decode_fds: VecDeque::new(),
             encode_fds: VecDeque::new(),
             cmsg_buffer: Box::new_uninit_slice(Self::SCM_RIGHTS_SPACE),
+            read_queue_limit,
         })
+    }
+
+    /// Sets the limit on file descriptors retained in the read queue.
+    ///
+    /// Takes effect on subsequent reads; descriptors already queued are unaffected,
+    /// but a limit below the current queue length makes the next fd-carrying read
+    /// fail.
+    pub fn set_read_queue_limit(&mut self, limit: usize) {
+        self.read_queue_limit = limit;
+    }
+
+    /// Returns the current limit on file descriptors retained in the read queue.
+    pub fn read_queue_limit(&self) -> usize {
+        self.read_queue_limit
     }
 
     /// Returns a reference to the queue of file descriptors received from the peer.
@@ -210,6 +250,7 @@ impl<const S: usize> AsyncRead for AnchovyStream<S> {
         let stream = &mut this.stream;
         let decode_fds = &mut this.decode_fds;
         let cmsg_buffer = &mut this.cmsg_buffer;
+        let read_queue_limit = this.read_queue_limit;
 
         loop {
             let mut guard = ready!(stream.poll_read_ready(cx))?;
@@ -239,6 +280,11 @@ impl<const S: usize> AsyncRead for AnchovyStream<S> {
                         )));
                     }
 
+                    // Push straight into the queue and roll back on overflow: we
+                    // hold `&mut self`, so the transient overshoot is unobservable
+                    // and no per-read staging allocation is needed.
+                    let retained = decode_fds.len();
+
                     for message in ancillary.drain() {
                         if let RecvAncillaryMessage::ScmRights(fds) = message {
                             for fd in fds {
@@ -246,6 +292,20 @@ impl<const S: usize> AsyncRead for AnchovyStream<S> {
                             }
                         }
                     }
+
+                    if decode_fds.len() > read_queue_limit {
+                        // Retaining these descriptors would let an undrained queue
+                        // grow without bound (fd table exhaustion). Truncating
+                        // closes this message's descriptors; delivering the bytes
+                        // anyway would desynchronize fd-carrying protocols, so the
+                        // read fails.
+                        decode_fds.truncate(retained);
+                        return Poll::Ready(Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "peer exceeded the stream's fd queue limit",
+                        )));
+                    }
+
                     buf.advance(msg.bytes);
                     return Poll::Ready(Ok(()));
                 }

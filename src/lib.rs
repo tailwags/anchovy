@@ -289,3 +289,9 @@ impl<const S: usize> AsyncWrite for AnchovyStream<S> {
         Poll::Ready(Ok(()))
     }
 }
+
+impl<const S: usize> AsFd for AnchovyStream<S> {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.stream.as_fd()
+    }
+}

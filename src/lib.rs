@@ -153,6 +153,12 @@ impl<const S: usize> AnchovyStream<S> {
         let stream = &mut self.stream;
         let encode_fds = &mut self.encode_fds;
 
+        // Ancillary data is only transmitted alongside at least one byte of payload,
+        // so an empty write would silently drop the queued fds.
+        if bufs.iter().all(|buf| buf.is_empty()) {
+            return Poll::Ready(Ok(0));
+        }
+
         loop {
             let mut guard = ready!(stream.poll_write_ready(cx))?;
 

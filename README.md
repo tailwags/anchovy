@@ -10,7 +10,7 @@ messages.
 
 ```toml
 [dependencies]
-anchovy = "0.1"
+anchovy = "0.4"
 ```
 
 The const generic `S` is the maximum number of file descriptors a single message

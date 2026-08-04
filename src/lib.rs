@@ -14,7 +14,7 @@ use std::{
 };
 
 use rustix::net::{
-    RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags, SendAncillaryBuffer,
+    RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags, ReturnFlags, SendAncillaryBuffer,
     SendAncillaryMessage, SendFlags, recvmsg, sendmsg,
 };
 use tokio::io::{self, AsyncRead, AsyncWrite, ReadBuf, unix::AsyncFd};
@@ -53,8 +53,10 @@ pub const WAYLAND_SCM_RIGHTS: usize = rustix::cmsg_space!(ScmRights(WAYLAND_FD_L
 /// `S` is the size in bytes of the stack-allocated ancillary data buffer used on each
 /// [`recvmsg`] / [`sendmsg`] call. It must be at least
 /// `rustix::cmsg_space!(ScmRights(N))` where `N` is the maximum number of file
-/// descriptors expected in a single message. Passing a smaller value will cause
-/// received file descriptors to be silently truncated by the kernel.
+/// descriptors expected in a single message. If a message carries more descriptors
+/// than fit, sends fail with [`InvalidInput`](io::ErrorKind::InvalidInput) and reads
+/// fail with [`InvalidData`](io::ErrorKind::InvalidData) (the kernel has already
+/// closed the descriptors that did not fit, so the stream is desynchronized).
 ///
 /// For D-Bus, pass [`DBUS_SCM_RIGHTS`] as `S`; for Wayland, pass [`WAYLAND_SCM_RIGHTS`].
 ///
@@ -168,8 +170,11 @@ impl<const S: usize> AnchovyStream<S> {
                 let mut cmsg_space = [MaybeUninit::uninit(); S];
                 let mut ancillary = SendAncillaryBuffer::new(&mut cmsg_space);
 
-                if !raw.is_empty() {
-                    ancillary.push(SendAncillaryMessage::ScmRights(&raw));
+                if !raw.is_empty() && !ancillary.push(SendAncillaryMessage::ScmRights(&raw)) {
+                    return Poll::Ready(Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "queued file descriptors do not fit in the ancillary buffer (`S` too small)",
+                    )));
                 }
 
                 guard.try_io(|inner| {
@@ -227,6 +232,17 @@ impl<const S: usize> AsyncRead for AnchovyStream<S> {
                 .map_err(|e| io::Error::from_raw_os_error(e.raw_os_error()))
             }) {
                 Ok(Ok(msg)) => {
+                    if msg.flags.contains(ReturnFlags::CTRUNC) {
+                        // The kernel truncated the ancillary data: descriptors that
+                        // did not fit have already been closed and are unrecoverable,
+                        // leaving the stream desynchronized. Descriptors that did fit
+                        // are closed when `ancillary` is dropped.
+                        return Poll::Ready(Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "ancillary data truncated: file descriptors were lost (`S` too small)",
+                        )));
+                    }
+
                     for message in ancillary.drain() {
                         if let RecvAncillaryMessage::ScmRights(fds) = message {
                             for fd in fds {

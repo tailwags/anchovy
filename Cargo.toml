@@ -1,6 +1,6 @@
 [package]
 name = "anchovy"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2024"
 rust-version = "1.85"
 description = "Async Unix socket stream with file descriptor passing"
@@ -11,7 +11,7 @@ repository = "https://github.com/tailwags/anchovy"
 include = ["src/**/*.rs", "README.md", "LICENSE"]
 
 [dependencies]
-rustix = { version = "1.1.4", features = ["net"] }
+rustix = { version = "1.1.5", features = ["net", "time"] }
 tokio = { version = "1.53.1", features = ["net"] }
 
 [dev-dependencies]

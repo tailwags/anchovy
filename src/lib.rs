@@ -44,13 +44,16 @@ pub const WAYLAND_FD_LIMIT: usize = 28;
 /// # Const generic `S`
 ///
 /// `S` is the maximum number of file descriptors that can be carried by a single
-/// message. The ancillary data buffer needed to hold that many descriptors is sized
-/// internally and allocated once at construction.
-/// At least `S` descriptors per message are guaranteed to fit; if a
-/// message carries more than fit in the buffer, sends fail with
-/// [`InvalidInput`](io::ErrorKind::InvalidInput) and reads fail with
-/// [`InvalidData`](io::ErrorKind::InvalidData) (the kernel has already closed the
-/// descriptors that did not fit, so the stream is desynchronized).
+/// message, enforced on both sides of the stream:
+///
+/// - A write with more than `S` descriptors queued fails with
+///   [`InvalidInput`](io::ErrorKind::InvalidInput); the queue is left intact.
+/// - A read of a message carrying more than `S` descriptors fails with
+///   [`InvalidData`](io::ErrorKind::InvalidData); that message's descriptors are
+///   closed and its payload is lost, so the stream is desynchronized.
+///
+/// Note that the kernel itself caps `SCM_RIGHTS` at 253 descriptors per message
+/// (`SCM_MAX_FD` on Linux), so an `S` above 253 does not necessarily allow larger messages.
 ///
 /// For D-Bus, pass [`DBUS_FD_LIMIT`] as `S`; for Wayland, pass [`WAYLAND_FD_LIMIT`].
 ///
@@ -203,6 +206,17 @@ impl<const S: usize> AnchovyStream<S> {
             return Poll::Ready(Ok(0));
         }
 
+        // The ancillary buffer is padded for platform alignment and could hold a
+        // few descriptors beyond `S`, so enforce the per-message limit explicitly.
+        // The queue is left intact so the caller can recover (e.g. split the batch
+        // across several writes).
+        if encode_fds.len() > S {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "more file descriptors queued than the stream's `S` limit permits in a single message",
+            )));
+        }
+
         let raw: Vec<BorrowedFd<'_>> = encode_fds.iter().map(AsFd::as_fd).collect();
 
         loop {
@@ -212,9 +226,11 @@ impl<const S: usize> AnchovyStream<S> {
                 let mut ancillary = SendAncillaryBuffer::new(cmsg_buffer);
 
                 if !raw.is_empty() && !ancillary.push(SendAncillaryMessage::ScmRights(&raw)) {
+                    // Unreachable while the buffer is sized for `S` descriptors and
+                    // the limit above is enforced; kept as a defensive fallback.
                     return Poll::Ready(Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
-                        "more file descriptors queued than the stream's `S` limit",
+                        "ancillary data buffer too small for the queued file descriptors",
                     )));
                 }
 
@@ -300,6 +316,20 @@ impl<const S: usize> AsyncRead for AnchovyStream<S> {
                                 decode_fds.push_back(fd);
                             }
                         }
+                    }
+
+                    if decode_fds.len() - retained > S {
+                        // The ancillary buffer can hold `S` plus platform alignment
+                        // padding, so every descriptor of an over-limit message can
+                        // arrive intact. Such a message violates the stream's
+                        // contract: close this message's descriptors and fail the
+                        // read. The payload has already been consumed from the
+                        // socket, so the stream is desynchronized.
+                        decode_fds.truncate(retained);
+                        return Poll::Ready(Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "peer sent more file descriptors than the stream's `S` limit permits in a single message",
+                        )));
                     }
 
                     if decode_fds.len() > read_queue_limit {

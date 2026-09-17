@@ -16,7 +16,11 @@ anchovy = "0.4"
 The const generic `S` is the maximum number of file descriptors a single message
 can carry. Use `AnchovyStream<DBUS_FD_LIMIT>` for D-Bus or
 `AnchovyStream<WAYLAND_FD_LIMIT>` for Wayland. For other protocols, set `S` to
-the maximum number of file descriptors you expect per message.
+the maximum number of file descriptors you expect per message. The limit is
+enforced: a write with more than `S` descriptors queued fails with
+`InvalidInput`, and a message carrying more than `S` descriptors fails the read
+with `InvalidData` (that message's descriptors are closed and its payload is
+lost).
 
 ### Sending file descriptors
 

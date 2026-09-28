@@ -36,6 +36,18 @@ pub const DBUS_FD_LIMIT: usize = 253;
 /// Use this as the `S` parameter of [`AnchovyStream`] when working with Wayland.
 pub const WAYLAND_FD_LIMIT: usize = 28;
 
+/// Upper bound on the bytes zero-initialized for a single `recvmsg`.
+///
+/// One call returns at most what the peer has in flight, which is bounded by its
+/// `SO_SNDBUF` (208 KiB by default on Linux), so initializing a caller's whole spare
+/// capacity (possibly many MiB when a codec reserves room for a large frame) would
+/// be wasted work on every read.
+const MAX_READ_WINDOW: usize = 256 * 1024;
+
+/// Maximum number of iovecs accepted by `sendmsg` (`UIO_MAXIOV` on Linux, `IOV_MAX`
+/// on the BSDs and macOS); passing more fails with `EMSGSIZE`.
+const MAX_IOV: usize = 1024;
+
 /// A Unix socket stream with support for passing file descriptors via `SCM_RIGHTS`
 /// ancillary messages.
 ///
@@ -119,7 +131,17 @@ impl IntoUnixStream for tokio::net::UnixStream {
 impl<const S: usize> AnchovyStream<S> {
     /// Ancillary buffer size (bytes) required to send or receive up to `S` file
     /// descriptors via `SCM_RIGHTS` in a single `recvmsg` / `sendmsg` call.
-    const SCM_RIGHTS_SPACE: usize = rustix::cmsg_space!(ScmRights(S));
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    const CMSG_SPACE: usize = rustix::cmsg_space!(ScmRights(S));
+
+    /// Ancillary buffer size (bytes) required to send or receive up to `S` file
+    /// descriptors via `SCM_RIGHTS` in a single `recvmsg` / `sendmsg` call.
+    ///
+    /// With `SO_PASSCRED` set, the kernel places an `SCM_CREDENTIALS` message in
+    /// front of the descriptors on every read. Without room for it, a message
+    /// carrying close to `S` descriptors would be truncated.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    const CMSG_SPACE: usize = rustix::cmsg_space!(ScmRights(S), ScmCredentials(1));
 
     /// Default limit on file descriptors retained in the read queue: four
     /// messages' worth.
@@ -145,7 +167,7 @@ impl<const S: usize> AnchovyStream<S> {
             stream,
             decode_fds: VecDeque::new(),
             encode_fds: VecDeque::new(),
-            cmsg_buffer: Box::new_uninit_slice(Self::SCM_RIGHTS_SPACE),
+            cmsg_buffer: Box::new_uninit_slice(Self::CMSG_SPACE),
             read_queue_limit,
         })
     }
@@ -202,9 +224,14 @@ impl<const S: usize> AnchovyStream<S> {
 
         // Ancillary data is only transmitted alongside at least one byte of payload,
         // so an empty write would silently drop the queued fds.
-        if bufs.iter().all(|buf| buf.is_empty()) {
+        let Some(first) = bufs.iter().position(|buf| !buf.is_empty()) else {
             return Poll::Ready(Ok(0));
-        }
+        };
+
+        // `sendmsg` rejects more than `MAX_IOV` iovecs outright; write a prefix
+        // instead, like `writev`-based streams do.
+        let bufs = &bufs[first..];
+        let bufs = &bufs[..bufs.len().min(MAX_IOV)];
 
         // The ancillary buffer is padded for platform alignment and could hold a
         // few descriptors beyond `S`, so enforce the per-message limit explicitly.
@@ -275,12 +302,19 @@ impl<const S: usize> AsyncRead for AnchovyStream<S> {
         let cmsg_buffer = &mut this.cmsg_buffer;
         let read_queue_limit = this.read_queue_limit;
 
+        // A zero-length `recvmsg` still detaches the descriptors of the next queued
+        // message and returns 0, so never issue one.
+        if buf.remaining() == 0 {
+            return Poll::Ready(Ok(()));
+        }
+
         loop {
             let mut guard = ready!(stream.poll_read_ready(cx))?;
 
             let mut ancillary = RecvAncillaryBuffer::new(cmsg_buffer);
 
-            let unfilled = buf.initialize_unfilled();
+            let window = buf.remaining().min(MAX_READ_WINDOW);
+            let unfilled = buf.initialize_unfilled_to(window);
 
             match guard.try_io(|inner| {
                 retry_on_intr(|| {
